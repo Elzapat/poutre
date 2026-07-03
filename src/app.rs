@@ -2,6 +2,7 @@ use crate::state::State;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalPosition,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::Window,
@@ -116,6 +117,7 @@ impl ApplicationHandler<State> for App {
                     },
                 ..
             } => state.handle_key(event_loop, code, key_state.is_pressed()),
+            WindowEvent::CursorMoved { position, .. } => state.handle_cursor(position),
             _ => {}
         }
     }

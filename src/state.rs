@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalPosition,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::Window,
@@ -12,6 +13,7 @@ pub struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     is_surface_configured: bool,
+    mouse_position: PhysicalPosition<f64>,
     window: Arc<Window>,
 }
 
@@ -80,6 +82,7 @@ impl State {
             queue,
             config,
             is_surface_configured: false,
+            mouse_position: Default::default(),
             window,
         })
     }
@@ -139,8 +142,8 @@ impl State {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
+                            r: self.mouse_position.x / 1000_f64,
+                            g: self.mouse_position.y / 1000_f64,
                             b: 0.3,
                             a: 1.0,
                         }),
@@ -165,6 +168,10 @@ impl State {
             (KeyCode::Escape, true) => event_loop.exit(),
             _ => {}
         }
+    }
+
+    pub fn handle_cursor(&mut self, position: PhysicalPosition<f64>) {
+        self.mouse_position = position;
     }
 
     pub fn update(&mut self) {}
