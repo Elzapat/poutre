@@ -1,16 +1,10 @@
 mod app;
 mod state;
+mod vertex;
 
 use app::App;
-use state::State;
-use std::sync::Arc;
 
-use winit::{
-    application::ApplicationHandler,
-    event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-    window::Window,
-};
+use winit::event_loop::EventLoop;
 
 pub fn run() -> anyhow::Result<()> {
     #[cfg(not(target_arch = "wasm32"))]

@@ -1,10 +1,7 @@
 use crate::state::State;
 use std::sync::Arc;
 use winit::{
-    application::ApplicationHandler,
-    dpi::PhysicalPosition,
-    event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
+    application::ApplicationHandler, event_loop::ActiveEventLoop, keyboard::PhysicalKey,
     window::Window,
 };
 
