@@ -10,6 +10,7 @@ use winit::window::{Window, WindowId};
 use crate::graphics::Graphics;
 use crate::input::InputState;
 use crate::network::Network;
+use crate::world::World;
 
 pub fn run() {
     tracing_subscriber::fmt::init();
@@ -70,9 +71,13 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if !egui_response.consumed {
-                    state
-                        .input
-                        .handle_mouse_input(&state.window, button_state, button);
+                    let should_excavate =
+                        state
+                            .input
+                            .handle_mouse_input(&state.window, button_state, button);
+                    if should_excavate {
+                        state.excavate();
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -119,6 +124,7 @@ struct State {
     graphics: Graphics,
     input: InputState,
     network: Network,
+    world: World,
     last_frame_at: Instant,
     fps: f32,
 }
@@ -130,6 +136,7 @@ impl State {
             graphics,
             input: InputState::default(),
             network: Network::connect(),
+            world: World::default(),
             last_frame_at: Instant::now(),
             fps: 0.0,
         }
@@ -139,9 +146,19 @@ impl State {
         let now = Instant::now();
         let frame_time = now.duration_since(self.last_frame_at).as_secs_f32();
         self.last_frame_at = now;
-        self.input.update_camera_position(frame_time);
+        let network_update = self.network.tick(self.input.camera());
+        for chunk in network_update.chunks {
+            self.world.insert_chunk(
+                chunk.id,
+                chunk.chunk_x,
+                chunk.chunk_z,
+                chunk.heights,
+                chunk.solid_quads,
+                chunk.water_quads,
+            );
+        }
+        self.input.update_camera_position(frame_time, &self.world);
         let camera = self.input.camera();
-        let remote_players = self.network.tick(camera);
 
         if frame_time > 0.0 {
             let instant_fps = 1.0 / frame_time;
@@ -152,7 +169,25 @@ impl State {
             };
         }
 
-        self.graphics
-            .render(&self.window, camera, &remote_players, self.fps);
+        self.graphics.render(
+            &self.window,
+            camera,
+            &self.world,
+            &network_update.remote_players,
+            self.fps,
+        );
+    }
+
+    fn excavate(&self) {
+        const MAX_DISTANCE: f32 = 8.0;
+
+        let camera = self.input.camera();
+        let Some([x, y, z]) =
+            self.world
+                .raycast_solid(camera.position, camera.look_direction(), MAX_DISTANCE)
+        else {
+            return;
+        };
+        self.network.excavate(x, y, z);
     }
 }

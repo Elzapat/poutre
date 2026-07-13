@@ -1,16 +1,15 @@
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use egui_wgpu::ScreenDescriptor;
-use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::window::Window;
 
 use crate::input::Camera;
 use crate::network::RemotePlayer;
-use crate::world::{Mesh, Quad, VOXEL_SIZE, World};
+use crate::world::{Mesh, MeshRequest, Quad, VOXEL_SIZE, World};
 
 const CAMERA_FOV_Y_DEGREES: f32 = 90.0;
 
@@ -26,15 +25,19 @@ pub struct Graphics {
     player_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
     voxel_quad_buffer: wgpu::Buffer,
+    voxel_quad_capacity: usize,
     voxel_quad_count: u32,
     water_quad_buffer: wgpu::Buffer,
+    water_quad_capacity: usize,
     water_quad_count: u32,
     voxel_chunk_count: usize,
     player_instance_buffer: wgpu::Buffer,
     player_instance_capacity: usize,
     player_instance_count: u32,
     requested_stream_cell: (isize, isize),
-    mesh_request_sender: mpsc::Sender<glam::Vec3>,
+    requested_world_revision: u64,
+    last_mesh_request_at: Instant,
+    mesh_request_sender: mpsc::Sender<MeshRequest>,
     mesh_result_receiver: mpsc::Receiver<Mesh>,
     camera_bind_group: wgpu::BindGroup,
     camera_uniform_buffer: wgpu::Buffer,
@@ -95,19 +98,9 @@ impl Graphics {
             surface_config.height,
             surface_config.format,
         );
-        let world = World::new(42);
-        let spawn = world.spawn_position();
-        let mesh = world.mesh_around(spawn);
-        let voxel_quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("voxel_quad_buffer"),
-            contents: quad_bytes(&mesh.quads),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let water_quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("water_quad_buffer"),
-            contents: quad_bytes(&mesh.water_quads),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let spawn = World::spawn_position();
+        let voxel_quad_buffer = empty_quad_buffer(&device, "voxel_quad_buffer");
+        let water_quad_buffer = empty_quad_buffer(&device, "water_quad_buffer");
         let (
             voxel_pipeline,
             water_pipeline,
@@ -145,8 +138,7 @@ impl Graphics {
             surface_config.format,
             egui_wgpu::RendererOptions::default(),
         );
-        let (mesh_request_sender, mesh_result_receiver) = spawn_mesh_worker(world);
-
+        let (mesh_request_sender, mesh_result_receiver) = spawn_mesh_worker();
         Self {
             surface,
             device,
@@ -159,14 +151,18 @@ impl Graphics {
             player_pipeline,
             composite_pipeline,
             voxel_quad_buffer,
-            voxel_quad_count: mesh.quads.len() as u32,
+            voxel_quad_capacity: 1,
+            voxel_quad_count: 0,
             water_quad_buffer,
-            water_quad_count: mesh.water_quads.len() as u32,
-            voxel_chunk_count: mesh.chunk_count,
+            water_quad_capacity: 1,
+            water_quad_count: 0,
+            voxel_chunk_count: 0,
             player_instance_buffer,
             player_instance_capacity,
             player_instance_count: 0,
             requested_stream_cell: World::stream_cell(spawn),
+            requested_world_revision: 0,
+            last_mesh_request_at: Instant::now(),
             mesh_request_sender,
             mesh_result_receiver,
             camera_bind_group,
@@ -214,6 +210,7 @@ impl Graphics {
         &mut self,
         window: &Window,
         camera: Camera,
+        world: &World,
         remote_players: &[RemotePlayer],
         fps: f32,
     ) {
@@ -221,7 +218,7 @@ impl Graphics {
             return;
         }
 
-        self.update_streamed_mesh(camera);
+        self.update_streamed_mesh(camera, world);
         self.update_camera_uniforms(camera);
         self.update_player_instances(remote_players);
 
@@ -408,37 +405,54 @@ impl Graphics {
             .write_buffer(&self.camera_uniform_buffer, 0, &bytes);
     }
 
-    fn update_streamed_mesh(&mut self, camera: Camera) {
+    fn update_streamed_mesh(&mut self, camera: Camera, world: &World) {
         let mut latest_mesh = None;
         while let Ok(mesh) = self.mesh_result_receiver.try_recv() {
             latest_mesh = Some(mesh);
         }
         if let Some(mesh) = latest_mesh {
-            self.voxel_quad_buffer =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("voxel_quad_buffer"),
-                        contents: quad_bytes(&mesh.quads),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+            upload_quad_buffer(
+                &self.device,
+                &self.queue,
+                &mut self.voxel_quad_buffer,
+                &mut self.voxel_quad_capacity,
+                "voxel_quad_buffer",
+                &mesh.quads,
+            );
+            upload_quad_buffer(
+                &self.device,
+                &self.queue,
+                &mut self.water_quad_buffer,
+                &mut self.water_quad_capacity,
+                "water_quad_buffer",
+                &mesh.water_quads,
+            );
             self.voxel_quad_count = mesh.quads.len() as u32;
-            self.water_quad_buffer =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("water_quad_buffer"),
-                        contents: quad_bytes(&mesh.water_quads),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
             self.water_quad_count = mesh.water_quads.len() as u32;
             self.voxel_chunk_count = mesh.chunk_count;
         }
 
         let streamed_cell = World::stream_cell(camera.position);
-        if streamed_cell == self.requested_stream_cell {
+        let stream_cell_changed = streamed_cell != self.requested_stream_cell;
+        let world_changed = world.revision() != self.requested_world_revision;
+        if !stream_cell_changed && !world_changed {
             return;
         }
-        if self.mesh_request_sender.send(camera.position).is_ok() {
+        if !stream_cell_changed
+            && self.voxel_chunk_count > 0
+            && self.last_mesh_request_at.elapsed() < Duration::from_millis(250)
+        {
+            return;
+        }
+
+        if self
+            .mesh_request_sender
+            .send(world.mesh_request(camera.position))
+            .is_ok()
+        {
             self.requested_stream_cell = streamed_cell;
+            self.requested_world_revision = world.revision();
+            self.last_mesh_request_at = Instant::now();
         }
     }
 
@@ -479,17 +493,17 @@ struct PlayerInstance {
     facing: [f32; 4],
 }
 
-fn spawn_mesh_worker(world: World) -> (mpsc::Sender<glam::Vec3>, mpsc::Receiver<Mesh>) {
-    let (request_sender, request_receiver) = mpsc::channel();
-    let (result_sender, result_receiver) = mpsc::channel();
+fn spawn_mesh_worker() -> (mpsc::Sender<MeshRequest>, mpsc::Receiver<Mesh>) {
+    let (request_sender, request_receiver) = mpsc::channel::<MeshRequest>();
+    let (result_sender, result_receiver) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("terrain-mesher".into())
         .spawn(move || {
-            while let Ok(mut position) = request_receiver.recv() {
-                while let Ok(newer_position) = request_receiver.try_recv() {
-                    position = newer_position;
+            while let Ok(mut request) = request_receiver.recv() {
+                while let Ok(newer_request) = request_receiver.try_recv() {
+                    request = newer_request;
                 }
-                if result_sender.send(world.mesh_around(position)).is_err() {
+                if result_sender.send(request.build()).is_err() {
                     break;
                 }
             }
@@ -754,6 +768,37 @@ fn create_pipelines(
 fn quad_bytes(quads: &[Quad]) -> &[u8] {
     // Quad is repr(C) and consists solely of four u32 values, so it has no padding.
     unsafe { std::slice::from_raw_parts(quads.as_ptr().cast::<u8>(), std::mem::size_of_val(quads)) }
+}
+
+fn empty_quad_buffer(device: &wgpu::Device, label: &str) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: std::mem::size_of::<Quad>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn upload_quad_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffer: &mut wgpu::Buffer,
+    capacity: &mut usize,
+    label: &str,
+    quads: &[Quad],
+) {
+    if quads.len() > *capacity {
+        *capacity = quads.len().next_power_of_two();
+        *buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (*capacity * std::mem::size_of::<Quad>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+    }
+    if !quads.is_empty() {
+        queue.write_buffer(buffer, 0, quad_bytes(quads));
+    }
 }
 
 fn player_instance_bytes(instances: &[PlayerInstance]) -> &[u8] {

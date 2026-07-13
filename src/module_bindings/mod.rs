@@ -7,16 +7,26 @@
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 pub mod connection_type;
+pub mod excavate_reducer;
+pub mod excavation_type;
 pub mod player_table;
 pub mod player_type;
+pub mod request_world_chunks_reducer;
 pub mod update_player_transform_reducer;
+pub mod world_chunk_table;
+pub mod world_chunk_type;
 pub mod world_table;
 pub mod world_type;
 
 pub use connection_type::Connection;
+pub use excavate_reducer::excavate;
+pub use excavation_type::Excavation;
 pub use player_table::*;
 pub use player_type::Player;
+pub use request_world_chunks_reducer::request_world_chunks;
 pub use update_player_transform_reducer::update_player_transform;
+pub use world_chunk_table::*;
+pub use world_chunk_type::WorldChunk;
 pub use world_table::*;
 pub use world_type::World;
 
@@ -28,6 +38,14 @@ pub use world_type::World;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
+    Excavate {
+        x: u32,
+        y: u32,
+        z: u32,
+    },
+    RequestWorldChunks {
+        chunk_ids: Vec<u64>,
+    },
     UpdatePlayerTransform {
         x: f32,
         y: f32,
@@ -44,6 +62,8 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
+            Reducer::Excavate { .. } => "excavate",
+            Reducer::RequestWorldChunks { .. } => "request_world_chunks",
             Reducer::UpdatePlayerTransform { .. } => "update_player_transform",
             _ => unreachable!(),
         }
@@ -51,6 +71,18 @@ impl __sdk::Reducer for Reducer {
     #[allow(clippy::clone_on_copy)]
     fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
+            Reducer::Excavate { x, y, z } => {
+                __sats::bsatn::to_vec(&excavate_reducer::ExcavateArgs {
+                    x: x.clone(),
+                    y: y.clone(),
+                    z: z.clone(),
+                })
+            }
+            Reducer::RequestWorldChunks { chunk_ids } => {
+                __sats::bsatn::to_vec(&request_world_chunks_reducer::RequestWorldChunksArgs {
+                    chunk_ids: chunk_ids.clone(),
+                })
+            }
             Reducer::UpdatePlayerTransform {
                 x,
                 y,
@@ -77,6 +109,7 @@ impl __sdk::Reducer for Reducer {
 pub struct DbUpdate {
     player: __sdk::TableUpdate<Player>,
     world: __sdk::TableUpdate<World>,
+    world_chunk: __sdk::TableUpdate<WorldChunk>,
 }
 
 impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
@@ -91,6 +124,9 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "world" => db_update
                     .world
                     .append(world_table::parse_table_update(table_update)?),
+                "world_chunk" => db_update
+                    .world_chunk
+                    .append(world_chunk_table::parse_table_update(table_update)?),
 
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name(
@@ -123,6 +159,9 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.world = cache
             .apply_diff_to_table::<World>("world", &self.world)
             .with_updates_by_pk(|row| &row.id);
+        diff.world_chunk = cache
+            .apply_diff_to_table::<WorldChunk>("world_chunk", &self.world_chunk)
+            .with_updates_by_pk(|row| &row.id);
 
         diff
     }
@@ -135,6 +174,9 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "world" => db_update
                     .world
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "world_chunk" => db_update
+                    .world_chunk
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 unknown => {
                     return Err(
@@ -155,6 +197,9 @@ impl __sdk::DbUpdate for DbUpdate {
                 "world" => db_update
                     .world
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "world_chunk" => db_update
+                    .world_chunk
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 unknown => {
                     return Err(
                         __sdk::InternalError::unknown_name("table", unknown, "QueryRows").into(),
@@ -172,6 +217,7 @@ impl __sdk::DbUpdate for DbUpdate {
 pub struct AppliedDiff<'r> {
     player: __sdk::TableAppliedDiff<'r, Player>,
     world: __sdk::TableAppliedDiff<'r, World>,
+    world_chunk: __sdk::TableAppliedDiff<'r, WorldChunk>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
 
@@ -187,6 +233,7 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
     ) {
         callbacks.invoke_table_row_callbacks::<Player>("player", &self.player, event);
         callbacks.invoke_table_row_callbacks::<World>("world", &self.world, event);
+        callbacks.invoke_table_row_callbacks::<WorldChunk>("world_chunk", &self.world_chunk, event);
     }
 }
 
@@ -849,6 +896,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
         player_table::register_table(client_cache);
         world_table::register_table(client_cache);
+        world_chunk_table::register_table(client_cache);
     }
-    const ALL_TABLE_NAMES: &'static [&'static str] = &["player", "world"];
+    const ALL_TABLE_NAMES: &'static [&'static str] = &["player", "world", "world_chunk"];
 }

@@ -2644,9 +2644,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "glam",
- "noise",
  "pollster",
- "rayon",
  "spacetimedb-sdk",
  "tracing",
  "tracing-subscriber",
@@ -2658,6 +2656,7 @@ dependencies = [
 name = "poutre-server"
 version = "0.1.0"
 dependencies = [
+ "noise",
  "spacetimedb",
 ]
 

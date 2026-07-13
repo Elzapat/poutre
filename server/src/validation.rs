@@ -2,6 +2,7 @@ pub(crate) const VOXEL_SIZE: f32 = 0.1;
 pub(crate) const CHUNK_SIZE: u32 = 32;
 pub(crate) const WORLD_CHUNKS: u32 = 600;
 pub(crate) const WORLD_SIZE: f32 = VOXEL_SIZE * CHUNK_SIZE as f32 * WORLD_CHUNKS as f32;
+pub(crate) const RENDER_DISTANCE_CHUNKS: u32 = 160;
 
 const MAX_PLAYER_HEIGHT: f32 = 100.0;
 const MAX_PITCH: f32 = 1.55;

@@ -3,7 +3,7 @@ use winit::event::{ElementState, KeyEvent, MouseButton};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window};
 
-use crate::world::{WORLD_SIZE, World};
+use crate::world::{VOXEL_SIZE, WORLD_SIZE, World};
 
 const CAMERA_MOUSE_SENSITIVITY: f32 = 0.005;
 const CAMERA_MAX_PITCH: f32 = 1.55;
@@ -11,6 +11,7 @@ const CAMERA_MOVE_SPEED: f32 = 4.5;
 const PLAYER_EYE_HEIGHT: f32 = 1.7;
 const PLAYER_RADIUS: f32 = 0.3;
 const PLAYER_STEP_HEIGHT: f32 = 0.3;
+const COLLISION_EPSILON: f32 = VOXEL_SIZE * 0.01;
 const GRAVITY: f32 = 20.0;
 const JUMP_SPEED: f32 = 7.0;
 
@@ -19,6 +20,14 @@ pub struct Camera {
     pub position: Vec3,
     pub yaw: f32,
     pub pitch: f32,
+}
+
+impl Camera {
+    pub fn look_direction(self) -> Vec3 {
+        let (yaw_sin, yaw_cos) = self.yaw.sin_cos();
+        let (pitch_sin, pitch_cos) = self.pitch.sin_cos();
+        Vec3::new(-yaw_sin * pitch_cos, pitch_sin, -yaw_cos * pitch_cos)
+    }
 }
 
 pub struct InputState {
@@ -31,15 +40,13 @@ pub struct InputState {
     jump: bool,
     vertical_velocity: f32,
     on_ground: bool,
-    world: World,
 }
 
 impl Default for InputState {
     fn default() -> Self {
-        let world = World::new(42);
         Self {
             camera: Camera {
-                position: world.spawn_position(),
+                position: World::spawn_position(),
                 yaw: 0.0,
                 pitch: 0.0,
             },
@@ -51,7 +58,6 @@ impl Default for InputState {
             jump: false,
             vertical_velocity: 0.0,
             on_ground: true,
-            world,
         }
     }
 }
@@ -66,10 +72,11 @@ impl InputState {
         window: &Window,
         state: ElementState,
         button: MouseButton,
-    ) {
+    ) -> bool {
         if button == MouseButton::Left && state == ElementState::Pressed {
             self.capture_mouse(window);
         }
+        button == MouseButton::Right && state == ElementState::Pressed && self.is_mouse_captured
     }
 
     pub fn handle_keyboard_input(&mut self, window: &Window, event: KeyEvent) {
@@ -112,7 +119,7 @@ impl InputState {
         self.jump = false;
     }
 
-    pub fn update_camera_position(&mut self, frame_time: f32) {
+    pub fn update_camera_position(&mut self, frame_time: f32, world: &World) {
         let frame_time = frame_time.min(0.05);
         let forward_amount = self.move_forward as i8 - self.move_backward as i8;
         let right_amount = self.move_right as i8 - self.move_left as i8;
@@ -124,27 +131,56 @@ impl InputState {
             .normalize_or_zero()
             * CAMERA_MOVE_SPEED
             * frame_time;
-        self.move_horizontal(Vec3::new(movement.x, 0.0, 0.0));
-        self.move_horizontal(Vec3::new(0.0, 0.0, movement.z));
+        self.move_horizontal(Vec3::new(movement.x, 0.0, 0.0), world);
+        self.move_horizontal(Vec3::new(0.0, 0.0, movement.z), world);
 
         if self.jump && self.on_ground {
             self.vertical_velocity = JUMP_SPEED;
             self.on_ground = false;
         }
+        let previous_y = self.camera.position.y;
         self.vertical_velocity -= GRAVITY * frame_time;
         self.camera.position.y += self.vertical_velocity * frame_time;
 
-        let ground = self.ground_height(self.camera.position.x, self.camera.position.z);
+        let previous_feet = previous_y - PLAYER_EYE_HEIGHT;
+        let feet = self.camera.position.y - PLAYER_EYE_HEIGHT;
+        let ground = self
+            .ground_height(world, self.camera.position.x, self.camera.position.z)
+            .max(
+                world
+                    .highest_solid_top(
+                        self.camera.position.x - PLAYER_RADIUS,
+                        self.camera.position.x + PLAYER_RADIUS,
+                        self.camera.position.z - PLAYER_RADIUS,
+                        self.camera.position.z + PLAYER_RADIUS,
+                        feet,
+                        previous_feet + COLLISION_EPSILON,
+                    )
+                    .unwrap_or(0.0),
+            );
         if self.camera.position.y <= ground + PLAYER_EYE_HEIGHT {
             self.camera.position.y = ground + PLAYER_EYE_HEIGHT;
             self.vertical_velocity = 0.0;
             self.on_ground = true;
+        } else if self.vertical_velocity > 0.0
+            && let Some(ceiling) = world.lowest_solid_bottom(
+                self.camera.position.x - PLAYER_RADIUS,
+                self.camera.position.x + PLAYER_RADIUS,
+                self.camera.position.z - PLAYER_RADIUS,
+                self.camera.position.z + PLAYER_RADIUS,
+                previous_y,
+                self.camera.position.y,
+            )
+        {
+            self.camera.position.y = ceiling - COLLISION_EPSILON;
+            self.vertical_velocity = 0.0;
+            self.on_ground = false;
         } else {
             self.on_ground = false;
         }
     }
 
-    fn move_horizontal(&mut self, movement: Vec3) {
+    fn move_horizontal(&mut self, movement: Vec3, world: &World) {
         if movement == Vec3::ZERO {
             return;
         }
@@ -153,9 +189,26 @@ impl InputState {
         candidate.x = candidate.x.clamp(PLAYER_RADIUS, WORLD_SIZE - PLAYER_RADIUS);
         candidate.z = candidate.z.clamp(PLAYER_RADIUS, WORLD_SIZE - PLAYER_RADIUS);
         let feet = self.camera.position.y - PLAYER_EYE_HEIGHT;
-        let candidate_ground = self.ground_height(candidate.x, candidate.z);
+        let candidate_ground = self.ground_height(world, candidate.x, candidate.z);
         let can_step = self.on_ground && candidate_ground <= feet + PLAYER_STEP_HEIGHT;
-        if candidate_ground <= feet || can_step {
+        let candidate_feet = if can_step {
+            candidate_ground.max(feet)
+        } else {
+            feet
+        };
+        let hits_solid_voxel = world.intersects_solid_voxels(
+            Vec3::new(
+                candidate.x - PLAYER_RADIUS,
+                candidate_feet + COLLISION_EPSILON,
+                candidate.z - PLAYER_RADIUS,
+            ),
+            Vec3::new(
+                candidate.x + PLAYER_RADIUS,
+                candidate_feet + PLAYER_EYE_HEIGHT,
+                candidate.z + PLAYER_RADIUS,
+            ),
+        );
+        if (candidate_ground <= feet || can_step) && !hits_solid_voxel {
             self.camera.position.x = candidate.x;
             self.camera.position.z = candidate.z;
             if can_step && candidate_ground > feet {
@@ -164,7 +217,7 @@ impl InputState {
         }
     }
 
-    fn ground_height(&self, x: f32, z: f32) -> f32 {
+    fn ground_height(&self, world: &World, x: f32, z: f32) -> f32 {
         [
             (-PLAYER_RADIUS, -PLAYER_RADIUS),
             (-PLAYER_RADIUS, PLAYER_RADIUS),
@@ -172,7 +225,7 @@ impl InputState {
             (PLAYER_RADIUS, PLAYER_RADIUS),
         ]
         .into_iter()
-        .map(|(offset_x, offset_z)| self.world.height_at(x + offset_x, z + offset_z))
+        .map(|(offset_x, offset_z)| world.height_at(x + offset_x, z + offset_z))
         .fold(0.0, f32::max)
     }
 

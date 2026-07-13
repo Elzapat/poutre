@@ -134,6 +134,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         voxel_color = vec3<f32>(0.34, 0.33, 0.30);
     } else if input.material == 7u {
         voxel_color = vec3<f32>(0.36, 0.25, 0.16);
+    } else if input.material == 9u {
+        voxel_color = vec3<f32>(0.38, 0.22, 0.10);
+    } else if input.material == 10u {
+        voxel_color = mix(vec3<f32>(0.12, 0.34, 0.10), vec3<f32>(0.25, 0.50, 0.15), grass_noise);
+    } else if input.material == 11u {
+        voxel_color = mix(vec3<f32>(0.10, 0.29, 0.08), vec3<f32>(0.20, 0.43, 0.12), grass_noise);
+    } else if input.material == 12u {
+        voxel_color = vec3<f32>(0.86, 0.16, 0.22);
+    } else if input.material == 13u {
+        voxel_color = vec3<f32>(0.98, 0.72, 0.12);
+    } else if input.material == 14u {
+        voxel_color = vec3<f32>(0.18, 0.48, 0.12);
     }
 
     // The material color is shared by every face; broad ambient and sunlight provide
