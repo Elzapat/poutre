@@ -1,5 +1,6 @@
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Instant;
 
 use egui_wgpu::ScreenDescriptor;
 use wgpu::util::DeviceExt;
@@ -18,11 +19,16 @@ pub struct Graphics {
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
-    depth_view: wgpu::TextureView,
+    scene_color_view: wgpu::TextureView,
+    scene_depth_view: wgpu::TextureView,
     voxel_pipeline: wgpu::RenderPipeline,
+    water_pipeline: wgpu::RenderPipeline,
     player_pipeline: wgpu::RenderPipeline,
+    composite_pipeline: wgpu::RenderPipeline,
     voxel_quad_buffer: wgpu::Buffer,
     voxel_quad_count: u32,
+    water_quad_buffer: wgpu::Buffer,
+    water_quad_count: u32,
     voxel_chunk_count: usize,
     player_instance_buffer: wgpu::Buffer,
     player_instance_capacity: usize,
@@ -32,6 +38,9 @@ pub struct Graphics {
     mesh_result_receiver: mpsc::Receiver<Mesh>,
     camera_bind_group: wgpu::BindGroup,
     camera_uniform_buffer: wgpu::Buffer,
+    scene_bind_group_layout: wgpu::BindGroupLayout,
+    scene_bind_group: wgpu::BindGroup,
+    started_at: Instant,
     egui_context: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
@@ -80,18 +89,40 @@ impl Graphics {
         surface_config.present_mode = wgpu::PresentMode::AutoNoVsync;
         surface.configure(&device, &surface_config);
 
-        let depth_view = create_depth_view(&device, surface_config.width, surface_config.height);
+        let (scene_color_view, scene_depth_view) = create_scene_views(
+            &device,
+            surface_config.width,
+            surface_config.height,
+            surface_config.format,
+        );
         let world = World::new(42);
         let spawn = world.spawn_position();
         let mesh = world.mesh_around(spawn);
-        let quad_bytes = quad_bytes(&mesh.quads);
         let voxel_quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("voxel_quad_buffer"),
-            contents: quad_bytes,
+            contents: quad_bytes(&mesh.quads),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let (voxel_pipeline, player_pipeline, camera_bind_group, camera_uniform_buffer) =
-            create_pipelines(&device, surface_config.format);
+        let water_quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("water_quad_buffer"),
+            contents: quad_bytes(&mesh.water_quads),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let (
+            voxel_pipeline,
+            water_pipeline,
+            player_pipeline,
+            composite_pipeline,
+            camera_bind_group,
+            camera_uniform_buffer,
+            scene_bind_group_layout,
+            scene_bind_group,
+        ) = create_pipelines(
+            &device,
+            surface_config.format,
+            &scene_color_view,
+            &scene_depth_view,
+        );
         let player_instance_capacity = 16;
         let player_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("player_instance_buffer"),
@@ -121,11 +152,16 @@ impl Graphics {
             device,
             queue,
             surface_config,
-            depth_view,
+            scene_color_view,
+            scene_depth_view,
             voxel_pipeline,
+            water_pipeline,
             player_pipeline,
+            composite_pipeline,
             voxel_quad_buffer,
             voxel_quad_count: mesh.quads.len() as u32,
+            water_quad_buffer,
+            water_quad_count: mesh.water_quads.len() as u32,
             voxel_chunk_count: mesh.chunk_count,
             player_instance_buffer,
             player_instance_capacity,
@@ -135,6 +171,9 @@ impl Graphics {
             mesh_result_receiver,
             camera_bind_group,
             camera_uniform_buffer,
+            scene_bind_group_layout,
+            scene_bind_group,
+            started_at: Instant::now(),
             egui_context,
             egui_state,
             egui_renderer,
@@ -157,7 +196,18 @@ impl Graphics {
         self.surface_config.width = size.width;
         self.surface_config.height = size.height;
         self.surface.configure(&self.device, &self.surface_config);
-        self.depth_view = create_depth_view(&self.device, size.width, size.height);
+        (self.scene_color_view, self.scene_depth_view) = create_scene_views(
+            &self.device,
+            size.width,
+            size.height,
+            self.surface_config.format,
+        );
+        self.scene_bind_group = create_scene_bind_group(
+            &self.device,
+            &self.scene_bind_group_layout,
+            &self.scene_color_view,
+            &self.scene_depth_view,
+        );
     }
 
     pub fn render(
@@ -205,9 +255,15 @@ impl Graphics {
                 .show(ui.ctx(), |ui| {
                     ui.label(format!("FPS: {:.1}", fps));
                     ui.label(format!("Visible chunks: {}", self.voxel_chunk_count));
-                    ui.label(format!("Voxel quads: {}", self.voxel_quad_count));
+                    ui.label(format!(
+                        "Voxel quads: {}",
+                        self.voxel_quad_count + self.water_quad_count
+                    ));
                     ui.label(format!("Voxel size: {:.1}", VOXEL_SIZE));
-                    ui.label(format!("Triangles: {}", self.voxel_quad_count * 2));
+                    ui.label(format!(
+                        "Triangles: {}",
+                        (self.voxel_quad_count + self.water_quad_count) * 2
+                    ));
                     ui.label(format!("Remote players: {}", self.player_instance_count));
                     ui.separator();
                     ui.label("Click to look");
@@ -242,7 +298,7 @@ impl Graphics {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("voxel_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.scene_color_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -256,10 +312,10 @@ impl Graphics {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
+                    view: &self.scene_depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
                 }),
@@ -274,6 +330,33 @@ impl Graphics {
             render_pass.set_pipeline(&self.player_pipeline);
             render_pass.set_vertex_buffer(0, self.player_instance_buffer.slice(..));
             render_pass.draw(0..36, 0..self.player_instance_count);
+        }
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("water_composite_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            render_pass.set_pipeline(&self.composite_pipeline);
+            render_pass.set_bind_group(0, &self.scene_bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
+            render_pass.set_pipeline(&self.water_pipeline);
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.scene_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.water_quad_buffer.slice(..));
+            render_pass.draw(0..4, 0..self.water_quad_count);
         }
 
         {
@@ -320,6 +403,7 @@ impl Graphics {
         bytes[16..20].copy_from_slice(&camera.position.x.to_ne_bytes());
         bytes[20..24].copy_from_slice(&camera.position.y.to_ne_bytes());
         bytes[24..28].copy_from_slice(&camera.position.z.to_ne_bytes());
+        bytes[28..32].copy_from_slice(&self.started_at.elapsed().as_secs_f32().to_ne_bytes());
         self.queue
             .write_buffer(&self.camera_uniform_buffer, 0, &bytes);
     }
@@ -338,6 +422,14 @@ impl Graphics {
                         usage: wgpu::BufferUsages::VERTEX,
                     });
             self.voxel_quad_count = mesh.quads.len() as u32;
+            self.water_quad_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("water_quad_buffer"),
+                        contents: quad_bytes(&mesh.water_quads),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            self.water_quad_count = mesh.water_quads.len() as u32;
             self.voxel_chunk_count = mesh.chunk_count;
         }
 
@@ -409,11 +501,17 @@ fn spawn_mesh_worker(world: World) -> (mpsc::Sender<glam::Vec3>, mpsc::Receiver<
 fn create_pipelines(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
+    scene_color_view: &wgpu::TextureView,
+    scene_depth_view: &wgpu::TextureView,
 ) -> (
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
     wgpu::RenderPipeline,
     wgpu::RenderPipeline,
     wgpu::BindGroup,
     wgpu::Buffer,
+    wgpu::BindGroupLayout,
+    wgpu::BindGroup,
 ) {
     let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/cube.wgsl"));
 
@@ -428,7 +526,7 @@ fn create_pipelines(
         label: Some("camera_bind_group_layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
@@ -446,6 +544,45 @@ fn create_pipelines(
             resource: uniform_buffer.as_entire_binding(),
         }],
     });
+
+    let scene_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+    let scene_bind_group = create_scene_bind_group(
+        device,
+        &scene_bind_group_layout,
+        scene_color_view,
+        scene_depth_view,
+    );
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cube_pipeline_layout"),
@@ -492,6 +629,45 @@ fn create_pipelines(
         cache: None,
     });
 
+    let water_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/water.wgsl"));
+    let water_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("water_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_group_layout), Some(&scene_bind_group_layout)],
+        immediate_size: 0,
+    });
+    let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("water_pipeline"),
+        layout: Some(&water_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &water_shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 16,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Uint32x4],
+            }],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &water_shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
     let player_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/player.wgsl"));
     let player_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("player_pipeline"),
@@ -529,7 +705,50 @@ fn create_pipelines(
         cache: None,
     });
 
-    (pipeline, player_pipeline, bind_group, uniform_buffer)
+    let composite_shader =
+        device.create_shader_module(wgpu::include_wgsl!("shaders/composite.wgsl"));
+    let composite_pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("composite_pipeline_layout"),
+            bind_group_layouts: &[Some(&scene_bind_group_layout)],
+            immediate_size: 0,
+        });
+    let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("composite_pipeline"),
+        layout: Some(&composite_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &composite_shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &composite_shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    (
+        pipeline,
+        water_pipeline,
+        player_pipeline,
+        composite_pipeline,
+        bind_group,
+        uniform_buffer,
+        scene_bind_group_layout,
+        scene_bind_group,
+    )
 }
 
 fn quad_bytes(quads: &[Quad]) -> &[u8] {
@@ -547,21 +766,74 @@ fn player_instance_bytes(instances: &[PlayerInstance]) -> &[u8] {
     }
 }
 
-fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
-    device
+fn create_scene_views(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    color_format: wgpu::TextureFormat,
+) -> (wgpu::TextureView, wgpu::TextureView) {
+    let size = wgpu::Extent3d {
+        width: width.max(1),
+        height: height.max(1),
+        depth_or_array_layers: 1,
+    };
+    let color = device
         .create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth_texture"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
+            label: Some("scene_color_texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    let depth = device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene_depth_texture"),
+            size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         })
-        .create_view(&wgpu::TextureViewDescriptor::default())
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    (color, depth)
+}
+
+fn create_scene_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    color_view: &wgpu::TextureView,
+    depth_view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("scene_sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scene_bind_group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(color_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    })
 }

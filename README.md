@@ -3,8 +3,9 @@
 Poutre is a small voxel engine written in Rust with `wgpu` and `winit`.
 
 It includes a streamed procedural Perlin-noise world with 32 x 32 x 32 chunks and
-0.1-unit, single-color voxels, simple directional lighting, depth-tested GPU
-rendering, terrain collision, a walking controller, and an egui performance overlay.
+0.1-unit voxels, mountain, snow, grass, animated water and foam, voxel clouds,
+distance-hazed daylight, depth-tested GPU rendering, terrain collision, a walking
+controller, and an egui performance overlay.
 
 ## Run
 
