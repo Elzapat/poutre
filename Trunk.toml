@@ -1,0 +1,6 @@
+[build]
+target = "index.html"
+dist = "dist"
+public_url = "./"
+filehash = true
+no_sri = true

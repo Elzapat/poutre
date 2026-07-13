@@ -17,6 +17,23 @@ Click the viewport to capture the mouse. Use `WASD` to move, `Space` to jump, an
 `Escape` to release the mouse. While the mouse is captured, right-click terrain or
 trees to excavate a sphere with an 8-block radius.
 
+## Web
+
+Install [Trunk](https://trunkrs.dev/), then start the browser build:
+
+```sh
+cargo install trunk --locked
+trunk serve --open
+```
+
+Use `trunk build --release` to compile only the `poutre` client binary into a
+deployable page in `dist`. The browser client uses WebGPU and connects to the
+same local SpacetimeDB server.
+
+The built page must be served over HTTP; browsers cannot load its JavaScript
+modules or WebAssembly when `dist/index.html` is opened directly with `file://`.
+Use `trunk serve --release --open` for a release-mode local server.
+
 ## Multiplayer server
 
 The SpacetimeDB module in `server` generates and stores authoritative terrain chunks,

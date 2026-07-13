@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use glam::Vec3;
 
-pub const VOXEL_SIZE: f32 = 0.1;
-pub const CHUNK_SIZE: usize = 32;
-pub const WORLD_CHUNKS: usize = 600;
-pub const WORLD_VOXELS: usize = CHUNK_SIZE * WORLD_CHUNKS;
-pub const WORLD_SIZE: f32 = WORLD_VOXELS as f32 * VOXEL_SIZE;
-pub const RENDER_DISTANCE_CHUNKS: isize = 160;
+pub(crate) const VOXEL_SIZE: f32 = 0.1;
+const CHUNK_SIZE: usize = 32;
+const WORLD_CHUNKS: usize = 600;
+const WORLD_VOXELS: usize = CHUNK_SIZE * WORLD_CHUNKS;
+pub(crate) const WORLD_SIZE: f32 = WORLD_VOXELS as f32 * VOXEL_SIZE;
+const RENDER_DISTANCE_CHUNKS: isize = 160;
 
 const STREAM_STEP: isize = 16;
 const FALLBACK_GROUND_HEIGHT: f32 = 23.3;
@@ -16,11 +16,11 @@ const PATCH_FORMAT_FLAG: u64 = 1 << 23;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct Quad {
+pub(crate) struct Quad {
     pub packed: [u32; 4],
 }
 
-pub struct Mesh {
+pub(crate) struct Mesh {
     pub quads: Vec<Quad>,
     pub water_quads: Vec<Quad>,
     pub chunk_count: usize,
@@ -33,7 +33,7 @@ struct Chunk {
 }
 
 #[derive(Default)]
-pub struct World {
+pub(crate) struct World {
     chunks: HashMap<u64, Arc<Chunk>>,
     heights: HashMap<(u32, u32), Vec<u16>>,
     collision_voxels: HashMap<[u32; 3], usize>,
@@ -41,16 +41,16 @@ pub struct World {
 }
 
 impl World {
-    pub fn spawn_position() -> Vec3 {
+    pub(crate) fn spawn_position() -> Vec3 {
         let center = WORLD_SIZE * 0.5;
         Vec3::new(center, FALLBACK_GROUND_HEIGHT + 1.7, center)
     }
 
-    pub fn revision(&self) -> u64 {
+    pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
 
-    pub fn insert_chunk(
+    pub(crate) fn insert_chunk(
         &mut self,
         id: u64,
         chunk_x: u32,
@@ -109,7 +109,7 @@ impl World {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    pub fn raycast_solid(
+    pub(crate) fn raycast_solid(
         &self,
         origin: Vec3,
         direction: Vec3,
@@ -153,7 +153,7 @@ impl World {
         hit
     }
 
-    pub fn height_at(&self, x: f32, z: f32) -> f32 {
+    pub(crate) fn height_at(&self, x: f32, z: f32) -> f32 {
         let voxel_x = (x / VOXEL_SIZE).floor().max(0.0) as usize;
         let voxel_z = (z / VOXEL_SIZE).floor().max(0.0) as usize;
         let chunk_x = (voxel_x / CHUNK_SIZE) as u32;
@@ -166,7 +166,7 @@ impl World {
         (heights[local_x + CHUNK_SIZE * local_z] as f32 + 1.0) * VOXEL_SIZE
     }
 
-    pub fn intersects_solid_voxels(&self, min: Vec3, max: Vec3) -> bool {
+    pub(crate) fn intersects_solid_voxels(&self, min: Vec3, max: Vec3) -> bool {
         let Some((min_x, max_x)) = voxel_range(min.x, max.x) else {
             return false;
         };
@@ -189,7 +189,7 @@ impl World {
         false
     }
 
-    pub fn highest_solid_top(
+    pub(crate) fn highest_solid_top(
         &self,
         min_x: f32,
         max_x: f32,
@@ -219,7 +219,7 @@ impl World {
         highest
     }
 
-    pub fn lowest_solid_bottom(
+    pub(crate) fn lowest_solid_bottom(
         &self,
         min_x: f32,
         max_x: f32,
@@ -254,7 +254,7 @@ impl World {
         self.mesh_request(position).build()
     }
 
-    pub fn mesh_request(&self, position: Vec3) -> MeshRequest {
+    pub(crate) fn mesh_request(&self, position: Vec3) -> MeshRequest {
         let rendered_ids = self.rendered_chunk_ids(position);
         let chunks = rendered_ids
             .iter()
@@ -263,7 +263,7 @@ impl World {
         MeshRequest { chunks }
     }
 
-    pub fn stream_bounds(position: Vec3) -> (u32, u32, u32, u32) {
+    pub(crate) fn stream_bounds(position: Vec3) -> (u32, u32, u32, u32) {
         let (center_x, center_z) = stream_center_chunk(position);
         let min_x = ((center_x - RENDER_DISTANCE_CHUNKS).max(0) / 16 * 16) as u32;
         let min_z = ((center_z - RENDER_DISTANCE_CHUNKS).max(0) / 16 * 16) as u32;
@@ -272,7 +272,7 @@ impl World {
         (min_x, min_z, max_x, max_z)
     }
 
-    pub fn stream_cell(position: Vec3) -> (isize, isize) {
+    pub(crate) fn stream_cell(position: Vec3) -> (isize, isize) {
         let chunk_size = CHUNK_SIZE as f32 * VOXEL_SIZE;
         let chunk_x = (position.x / chunk_size).floor() as isize;
         let chunk_z = (position.z / chunk_size).floor() as isize;
@@ -322,12 +322,12 @@ impl World {
     }
 }
 
-pub struct MeshRequest {
+pub(crate) struct MeshRequest {
     chunks: Vec<Arc<Chunk>>,
 }
 
 impl MeshRequest {
-    pub fn build(self) -> Mesh {
+    pub(crate) fn build(self) -> Mesh {
         let solid_quad_count = self
             .chunks
             .iter()
@@ -352,7 +352,7 @@ impl MeshRequest {
     }
 }
 
-pub fn desired_chunk_ids(position: Vec3) -> Vec<u64> {
+fn desired_chunk_ids(position: Vec3) -> Vec<u64> {
     let (center_x, center_z) = stream_center_chunk(position);
     let mut ids = Vec::new();
     let (min_x, min_z, max_x, max_z) = World::stream_bounds(position);
@@ -365,7 +365,7 @@ pub fn desired_chunk_ids(position: Vec3) -> Vec<u64> {
     ids
 }
 
-pub fn requested_chunk_ids(position: Vec3) -> Vec<u64> {
+pub(crate) fn requested_chunk_ids(position: Vec3) -> Vec<u64> {
     let desired = desired_chunk_ids(position);
     let (center_x, center_z) = stream_center_chunk(position);
     let mut ids = Vec::with_capacity(desired.len() + 512);

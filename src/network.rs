@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, Instant};
 
 use glam::Vec3;
 use spacetimedb_sdk::{DbContext, SubscriptionHandle as _, Table, TableWithPrimaryKey};
+use web_time::{Duration, Instant};
 
 use crate::input::Camera;
 use crate::module_bindings::{
@@ -23,17 +23,17 @@ const CHUNKS_PER_REQUEST: usize = 16;
 const CHUNK_UPDATES_PER_TICK: usize = 16;
 
 #[derive(Clone, Copy)]
-pub struct RemotePlayer {
+pub(crate) struct RemotePlayer {
     pub position: Vec3,
     pub yaw: f32,
 }
 
-pub struct NetworkUpdate {
+pub(crate) struct NetworkUpdate {
     pub remote_players: Vec<RemotePlayer>,
     pub chunks: Vec<WorldChunk>,
 }
 
-pub struct Network {
+pub(crate) struct Network {
     connection: DbConnection,
     last_sent_at: Option<Instant>,
     last_sent_camera: Option<Camera>,
@@ -50,9 +50,10 @@ pub struct Network {
 }
 
 impl Network {
-    pub fn connect() -> Self {
+    pub(crate) async fn connect() -> Self {
         let (chunk_update_sender, chunk_update_receiver) = mpsc::channel();
-        let connection = DbConnection::builder()
+        // No token is persisted or reused, so every game process receives a new identity.
+        let connection_builder = DbConnection::builder()
             .with_uri(HOST)
             .with_database_name(DATABASE)
             .on_connect(|ctx, identity, _token| {
@@ -71,9 +72,15 @@ impl Network {
                 } else {
                     tracing::info!("disconnected from SpacetimeDB");
                 }
-            })
-            // No token is persisted or reused, so every game process receives a new identity.
+            });
+        #[cfg(not(target_arch = "wasm32"))]
+        let connection = connection_builder
             .build()
+            .expect("failed to create SpacetimeDB connection");
+        #[cfg(target_arch = "wasm32")]
+        let connection = connection_builder
+            .build()
+            .await
             .expect("failed to create SpacetimeDB connection");
 
         let insert_sender = chunk_update_sender.clone();
@@ -101,7 +108,7 @@ impl Network {
         }
     }
 
-    pub fn tick(&mut self, camera: Camera) -> NetworkUpdate {
+    pub(crate) fn tick(&mut self, camera: Camera) -> NetworkUpdate {
         if let Err(error) = self.connection.frame_tick() {
             if !self.connection_error_logged {
                 tracing::error!(%error, "failed to advance SpacetimeDB connection");
@@ -187,7 +194,7 @@ impl Network {
         }
     }
 
-    pub fn excavate(&self, x: u32, y: u32, z: u32) {
+    pub(crate) fn excavate(&self, x: u32, y: u32, z: u32) {
         if let Err(error) = self.connection.reducers.excavate(x, y, z) {
             tracing::warn!(%error, "failed to request terrain excavation");
         }

@@ -52,7 +52,7 @@ enum Material {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct Quad {
+pub(crate) struct Quad {
     pub packed: [u32; 4],
 }
 
@@ -78,7 +78,7 @@ pub(crate) struct WorldGenerator {
 }
 
 impl WorldGenerator {
-    pub fn new(seed: u32) -> Self {
+    fn new(seed: u32) -> Self {
         Self {
             seed,
             broad: Perlin::new(seed),
@@ -1069,7 +1069,7 @@ mod tests {
     #[test]
     fn generated_world_chunks_include_trees_and_flowers() {
         let world = WorldGenerator::new(42);
-        let tree_root = Some(find_tree_root(&world));
+        let (tree_x, tree_z) = find_tree_root(&world);
         let mut flower_root = None;
 
         'search: for z in 9_000..10_200_u32 {
@@ -1098,7 +1098,6 @@ mod tests {
             }
         }
 
-        let (tree_x, tree_z) = tree_root.expect("seed should place a tree on grass");
         let (tree_base_y, _) = world.tree_root(tree_x, tree_z).unwrap();
         let tree_chunk = world.generate_patch(tree_x / CHUNK_SIZE, tree_z / CHUNK_SIZE, 1);
         assert!(tree_chunk.quads.iter().any(|quad| {

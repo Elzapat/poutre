@@ -16,21 +16,21 @@ const GRAVITY: f32 = 20.0;
 const JUMP_SPEED: f32 = 7.0;
 
 #[derive(Clone, Copy)]
-pub struct Camera {
+pub(crate) struct Camera {
     pub position: Vec3,
     pub yaw: f32,
     pub pitch: f32,
 }
 
 impl Camera {
-    pub fn look_direction(self) -> Vec3 {
+    pub(crate) fn look_direction(self) -> Vec3 {
         let (yaw_sin, yaw_cos) = self.yaw.sin_cos();
         let (pitch_sin, pitch_cos) = self.pitch.sin_cos();
         Vec3::new(-yaw_sin * pitch_cos, pitch_sin, -yaw_cos * pitch_cos)
     }
 }
 
-pub struct InputState {
+pub(crate) struct InputState {
     camera: Camera,
     is_mouse_captured: bool,
     move_forward: bool,
@@ -63,11 +63,11 @@ impl Default for InputState {
 }
 
 impl InputState {
-    pub fn camera(&self) -> Camera {
+    pub(crate) fn camera(&self) -> Camera {
         self.camera
     }
 
-    pub fn handle_mouse_input(
+    pub(crate) fn handle_mouse_input(
         &mut self,
         window: &Window,
         state: ElementState,
@@ -79,7 +79,7 @@ impl InputState {
         button == MouseButton::Right && state == ElementState::Pressed && self.is_mouse_captured
     }
 
-    pub fn handle_keyboard_input(&mut self, window: &Window, event: KeyEvent) {
+    pub(crate) fn handle_keyboard_input(&mut self, window: &Window, event: KeyEvent) {
         let PhysicalKey::Code(code) = event.physical_key else {
             return;
         };
@@ -95,7 +95,7 @@ impl InputState {
         }
     }
 
-    pub fn handle_mouse_motion(&mut self, delta_x: f32, delta_y: f32) {
+    pub(crate) fn handle_mouse_motion(&mut self, delta_x: f32, delta_y: f32) {
         if !self.is_mouse_captured {
             return;
         }
@@ -105,13 +105,13 @@ impl InputState {
             .clamp(-CAMERA_MAX_PITCH, CAMERA_MAX_PITCH);
     }
 
-    pub fn release_mouse(&mut self, window: &Window) {
+    pub(crate) fn release_mouse(&mut self, window: &Window) {
         let _ = window.set_cursor_grab(CursorGrabMode::None);
         window.set_cursor_visible(true);
         self.is_mouse_captured = false;
     }
 
-    pub fn clear_movement(&mut self) {
+    pub(crate) fn clear_movement(&mut self) {
         self.move_forward = false;
         self.move_backward = false;
         self.move_left = false;
@@ -119,7 +119,7 @@ impl InputState {
         self.jump = false;
     }
 
-    pub fn update_camera_position(&mut self, frame_time: f32, world: &World) {
+    pub(crate) fn update_camera_position(&mut self, frame_time: f32, world: &World) {
         let frame_time = frame_time.min(0.05);
         let forward_amount = self.move_forward as i8 - self.move_backward as i8;
         let right_amount = self.move_right as i8 - self.move_left as i8;

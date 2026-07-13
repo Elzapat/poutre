@@ -1,9 +1,9 @@
 use std::sync::Arc;
-use std::time::Instant;
 
+use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
@@ -12,35 +12,99 @@ use crate::input::InputState;
 use crate::network::Network;
 use crate::world::World;
 
-pub fn run() {
+pub(crate) fn run() {
+    #[cfg(not(target_arch = "wasm32"))]
     tracing_subscriber::fmt::init();
+    #[cfg(target_arch = "wasm32")]
+    {
+        console_error_panic_hook::set_once();
+        tracing_wasm::set_as_global_default();
+    }
 
-    let event_loop = EventLoop::new().expect("failed to create event loop");
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::default();
-    event_loop.run_app(&mut app).expect("event loop failed");
+    let app = App::new(event_loop.create_proxy());
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut app = app;
+        event_loop.run_app(&mut app).expect("event loop failed");
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::EventLoopExtWebSys;
+
+        event_loop.spawn_app(app);
+    }
 }
 
-#[derive(Default)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+enum UserEvent {
+    StateReady(State),
+}
+
 struct App {
     state: Option<State>,
+    initializing_window: Option<Arc<Window>>,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    event_proxy: EventLoopProxy<UserEvent>,
 }
 
-impl ApplicationHandler for App {
+impl App {
+    fn new(event_proxy: EventLoopProxy<UserEvent>) -> Self {
+        Self {
+            state: None,
+            initializing_window: None,
+            event_proxy,
+        }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
+        if self.state.is_some() || self.initializing_window.is_some() {
             return;
         }
 
+        let window_attributes = Window::default_attributes().with_title("poutre");
+        #[cfg(target_arch = "wasm32")]
+        let window_attributes = {
+            use winit::platform::web::WindowAttributesExtWebSys;
+
+            window_attributes.with_append(true)
+        };
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes().with_title("poutre"))
+                .create_window(window_attributes)
                 .expect("failed to create window"),
         );
-        let graphics = pollster::block_on(Graphics::new(window.clone()));
 
-        self.state = Some(State::new(window, graphics));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.state = Some(pollster::block_on(State::new(window)));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let graphics_window = window.clone();
+            let event_proxy = self.event_proxy.clone();
+            self.initializing_window = Some(window);
+            wasm_bindgen_futures::spawn_local(async move {
+                let state = State::new(graphics_window).await;
+                let _ = event_proxy.send_event(UserEvent::StateReady(state));
+            });
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        let UserEvent::StateReady(state) = event;
+        if self.initializing_window.take().is_none() {
+            return;
+        }
+        state.window.request_redraw();
+        self.state = Some(state);
     }
 
     fn window_event(
@@ -130,12 +194,14 @@ struct State {
 }
 
 impl State {
-    fn new(window: Arc<Window>, graphics: Graphics) -> Self {
+    async fn new(window: Arc<Window>) -> Self {
+        let graphics = Graphics::new(window.clone()).await;
+        let network = Network::connect().await;
         Self {
             window,
             graphics,
             input: InputState::default(),
-            network: Network::connect(),
+            network,
             world: World::default(),
             last_frame_at: Instant::now(),
             fps: 0.0,

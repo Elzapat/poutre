@@ -1,19 +1,25 @@
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
-use std::time::{Duration, Instant};
 
 use egui_wgpu::ScreenDescriptor;
+use web_time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::window::Window;
 
 use crate::input::Camera;
 use crate::network::RemotePlayer;
-use crate::world::{Mesh, MeshRequest, Quad, VOXEL_SIZE, World};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::world::MeshRequest;
+use crate::world::{Mesh, Quad, VOXEL_SIZE, World};
 
 const CAMERA_FOV_Y_DEGREES: f32 = 90.0;
 
-pub struct Graphics {
+pub(crate) struct Graphics {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -37,7 +43,9 @@ pub struct Graphics {
     requested_stream_cell: (isize, isize),
     requested_world_revision: u64,
     last_mesh_request_at: Instant,
+    #[cfg(not(target_arch = "wasm32"))]
     mesh_request_sender: mpsc::Sender<MeshRequest>,
+    #[cfg(not(target_arch = "wasm32"))]
     mesh_result_receiver: mpsc::Receiver<Mesh>,
     camera_bind_group: wgpu::BindGroup,
     camera_uniform_buffer: wgpu::Buffer,
@@ -50,7 +58,7 @@ pub struct Graphics {
 }
 
 impl Graphics {
-    pub async fn new(window: Arc<Window>) -> Self {
+    pub(crate) async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance
@@ -138,6 +146,7 @@ impl Graphics {
             surface_config.format,
             egui_wgpu::RendererOptions::default(),
         );
+        #[cfg(not(target_arch = "wasm32"))]
         let (mesh_request_sender, mesh_result_receiver) = spawn_mesh_worker();
         Self {
             surface,
@@ -163,7 +172,9 @@ impl Graphics {
             requested_stream_cell: World::stream_cell(spawn),
             requested_world_revision: 0,
             last_mesh_request_at: Instant::now(),
+            #[cfg(not(target_arch = "wasm32"))]
             mesh_request_sender,
+            #[cfg(not(target_arch = "wasm32"))]
             mesh_result_receiver,
             camera_bind_group,
             camera_uniform_buffer,
@@ -176,7 +187,7 @@ impl Graphics {
         }
     }
 
-    pub fn handle_window_event(
+    pub(crate) fn handle_window_event(
         &mut self,
         window: &Window,
         event: &WindowEvent,
@@ -184,7 +195,7 @@ impl Graphics {
         self.egui_state.on_window_event(window, event)
     }
 
-    pub fn resize(&mut self, size: PhysicalSize<u32>) {
+    pub(crate) fn resize(&mut self, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;
         }
@@ -206,7 +217,7 @@ impl Graphics {
         );
     }
 
-    pub fn render(
+    pub(crate) fn render(
         &mut self,
         window: &Window,
         camera: Camera,
@@ -406,30 +417,15 @@ impl Graphics {
     }
 
     fn update_streamed_mesh(&mut self, camera: Camera, world: &World) {
-        let mut latest_mesh = None;
-        while let Ok(mesh) = self.mesh_result_receiver.try_recv() {
-            latest_mesh = Some(mesh);
-        }
-        if let Some(mesh) = latest_mesh {
-            upload_quad_buffer(
-                &self.device,
-                &self.queue,
-                &mut self.voxel_quad_buffer,
-                &mut self.voxel_quad_capacity,
-                "voxel_quad_buffer",
-                &mesh.quads,
-            );
-            upload_quad_buffer(
-                &self.device,
-                &self.queue,
-                &mut self.water_quad_buffer,
-                &mut self.water_quad_capacity,
-                "water_quad_buffer",
-                &mesh.water_quads,
-            );
-            self.voxel_quad_count = mesh.quads.len() as u32;
-            self.water_quad_count = mesh.water_quads.len() as u32;
-            self.voxel_chunk_count = mesh.chunk_count;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut latest_mesh = None;
+            while let Ok(mesh) = self.mesh_result_receiver.try_recv() {
+                latest_mesh = Some(mesh);
+            }
+            if let Some(mesh) = latest_mesh {
+                self.upload_mesh(mesh);
+            }
         }
 
         let streamed_cell = World::stream_cell(camera.position);
@@ -445,15 +441,44 @@ impl Graphics {
             return;
         }
 
-        if self
+        #[cfg(not(target_arch = "wasm32"))]
+        let mesh_requested = self
             .mesh_request_sender
             .send(world.mesh_request(camera.position))
-            .is_ok()
-        {
+            .is_ok();
+        #[cfg(target_arch = "wasm32")]
+        let mesh_requested = {
+            self.upload_mesh(world.mesh_request(camera.position).build());
+            true
+        };
+
+        if mesh_requested {
             self.requested_stream_cell = streamed_cell;
             self.requested_world_revision = world.revision();
             self.last_mesh_request_at = Instant::now();
         }
+    }
+
+    fn upload_mesh(&mut self, mesh: Mesh) {
+        upload_quad_buffer(
+            &self.device,
+            &self.queue,
+            &mut self.voxel_quad_buffer,
+            &mut self.voxel_quad_capacity,
+            "voxel_quad_buffer",
+            &mesh.quads,
+        );
+        upload_quad_buffer(
+            &self.device,
+            &self.queue,
+            &mut self.water_quad_buffer,
+            &mut self.water_quad_capacity,
+            "water_quad_buffer",
+            &mesh.water_quads,
+        );
+        self.voxel_quad_count = mesh.quads.len() as u32;
+        self.water_quad_count = mesh.water_quads.len() as u32;
+        self.voxel_chunk_count = mesh.chunk_count;
     }
 
     fn update_player_instances(&mut self, players: &[RemotePlayer]) {
@@ -493,6 +518,7 @@ struct PlayerInstance {
     facing: [f32; 4],
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_mesh_worker() -> (mpsc::Sender<MeshRequest>, mpsc::Receiver<Mesh>) {
     let (request_sender, request_receiver) = mpsc::channel::<MeshRequest>();
     let (result_sender, result_receiver) = mpsc::sync_channel(1);

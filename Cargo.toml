@@ -10,11 +10,21 @@ resolver = "3"
 [dependencies]
 egui = "0.35.0"
 egui-wgpu = "0.35.0"
-egui-winit = "0.35.0"
 glam = "0.33.2"
 pollster = "0.4.0"
-spacetimedb-sdk = "2.6.1"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+web-time = "1.1.0"
 wgpu = "29.0.3"
 winit = "0.30.13"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+egui-winit = "0.35.0"
+spacetimedb-sdk = "2.6.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.7"
+egui-winit = { version = "0.35.0", default-features = false }
+spacetimedb-sdk = { version = "2.6.1", features = ["browser"] }
+tracing-wasm = "0.2.1"
+wasm-bindgen-futures = "0.4.76"
